@@ -5,13 +5,15 @@ import os
 import json
 
 # --- KONFIGURACJA ---
-st.set_page_config(page_title="Builder Bot V3 (Org Support)", page_icon="🏢", layout="wide")
+st.set_page_config(page_title="Builder Bot V4 (Beton-Dysk)", page_icon="🏢", layout="wide")
 
 GH_TOKEN = os.getenv("GH_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 INFRA_REPO_NAME = "homelab-infra"
-# NOWOŚĆ: Pobieramy nazwę organizacji (opcjonalne)
-GITHUB_ORG_NAME = os.getenv("GITHUB_ORG_NAME") 
+
+# WYMUSZENIE ORGANIZACJI:
+# Jeśli zmienna nie jest ustawiona w Portainerze, użyjemy "beton-dysk"
+GITHUB_ORG_NAME = os.getenv("GITHUB_ORG_NAME", "beton-dysk") 
 
 if not GH_TOKEN or not OPENAI_API_KEY:
     st.error("❌ Brak kluczy środowiskowych.")
@@ -20,28 +22,28 @@ if not GH_TOKEN or not OPENAI_API_KEY:
 # Inicjalizacja
 g = Github(GH_TOKEN)
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
-user = g.get_user()
+# user = g.get_user() # <- To nam już niepotrzebne jako główne źródło
 
-# --- LOGIKA WYBORU WŁAŚCICIELA (USER vs ORG) ---
-# Jeśli podano organizację, działamy w jej kontekście.
-# Jeśli nie, działamy na koncie prywatnym użytkownika.
-if GITHUB_ORG_NAME:
-    try:
-        target_entity = g.get_organization(GITHUB_ORG_NAME)
-        owner_name = GITHUB_ORG_NAME.lower() # Do nazwy obrazu (małe litery!)
-        st.sidebar.success(f"🏢 Tryb Organizacji: {GITHUB_ORG_NAME}")
-    except Exception as e:
-        st.error(f"Nie znaleziono organizacji: {GITHUB_ORG_NAME}. Błąd: {e}")
+# --- LOGIKA: TYLKO ORGANIZACJA ---
+try:
+    # Pobieramy konkretnie organizację
+    target_entity = g.get_organization(GITHUB_ORG_NAME)
+    # Weryfikacja (dla pewności, że to org)
+    if target_entity.type != "Organization":
+        st.error(f"❌ {GITHUB_ORG_NAME} nie jest Organizacją!")
         st.stop()
-else:
-    target_entity = user
-    owner_name = user.login.lower() # Do nazwy obrazu
-    st.sidebar.info(f"👤 Tryb Użytkownika: {user.login}")
+        
+    owner_name = GITHUB_ORG_NAME.lower()
+    
+    # Pobieramy użytkownika tylko po to, żeby mieć dostęp do repo infra (jeśli infra jest na prywatnym)
+    # Jeśli infra TEŻ jest w organizacji beton-dysk, zmień poniżej 'g.get_user()' na 'target_entity'
+    infra_owner = g.get_user() 
+    
+except Exception as e:
+    st.error(f"❌ Nie mam dostępu do organizacji '{GITHUB_ORG_NAME}'. Sprawdź uprawnienia tokena GH_TOKEN! Błąd: {e}")
+    st.stop()
 
-
-st.title(f"🏢 Builder Bot V3")
-st.markdown(f"Tworzę projekty dla: **{owner_name.upper()}**")
-st.markdown("---")
+st.sidebar.success(f"🏢 WYMUSZONA ORGANIZACJA: {GITHUB_ORG_NAME}")
 
 # --- FUNKCJE ---
 
@@ -138,7 +140,7 @@ def update_infra_stack(project_name):
     try:
         # Infra zawsze jest na koncie użytkownika (lub też w orgu, zależy gdzie trzymasz)
         # Zakładam, że infra jest tam, gdzie user ma dostęp.
-        repo = user.get_repo(INFRA_REPO_NAME) 
+        repo = target_entity.get_repo(INFRA_REPO_NAME) 
         file = repo.get_contents("docker-compose.yml")
         content = file.decoded_content.decode("utf-8")
         
