@@ -22,7 +22,7 @@ g = Github(GH_TOKEN)
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 user = g.get_user()
 
-st.title(f"🏗️ Builder Bot V2 (Operator: {user.login})")
+st.title(f"🏗️ Builder Bot V2.1 (Operator: {user.login})")
 st.markdown("---")
 
 # --- FUNKCJE POMOCNICZE ---
