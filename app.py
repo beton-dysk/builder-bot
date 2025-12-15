@@ -77,7 +77,7 @@ name: Build and Push
 on: [push]
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: {user.login}/{project_name}
+  IMAGE_NAME: {user.login.lower()}/{project_name}
 jobs:
   build-push:
     runs-on: ubuntu-latest
