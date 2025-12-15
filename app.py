@@ -1,31 +1,49 @@
 import streamlit as st
-from github import Github
+from github import Github, GithubException
 import openai
 import os
 import json
-import time
 
 # --- KONFIGURACJA ---
-st.set_page_config(page_title="Builder Bot V2", page_icon="🏗️", layout="wide")
+st.set_page_config(page_title="Builder Bot V3 (Org Support)", page_icon="🏢", layout="wide")
 
 GH_TOKEN = os.getenv("GH_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-INFRA_REPO_NAME = "homelab-infra"  # Nazwa Twojego repo z infrastrukturą
+INFRA_REPO_NAME = "homelab-infra"
+# NOWOŚĆ: Pobieramy nazwę organizacji (opcjonalne)
+GITHUB_ORG_NAME = os.getenv("GITHUB_ORG_NAME") 
 
-# Sprawdzenie kluczy
 if not GH_TOKEN or not OPENAI_API_KEY:
-    st.error("❌ Brak kluczy środowiskowych (GH_TOKEN lub OPENAI_API_KEY).")
+    st.error("❌ Brak kluczy środowiskowych.")
     st.stop()
 
-# Inicjalizacja klientów
+# Inicjalizacja
 g = Github(GH_TOKEN)
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 user = g.get_user()
 
-st.title(f"🏗️ Builder Bot V2.1 (Operator: {user.login})")
+# --- LOGIKA WYBORU WŁAŚCICIELA (USER vs ORG) ---
+# Jeśli podano organizację, działamy w jej kontekście.
+# Jeśli nie, działamy na koncie prywatnym użytkownika.
+if GITHUB_ORG_NAME:
+    try:
+        target_entity = g.get_organization(GITHUB_ORG_NAME)
+        owner_name = GITHUB_ORG_NAME.lower() # Do nazwy obrazu (małe litery!)
+        st.sidebar.success(f"🏢 Tryb Organizacji: {GITHUB_ORG_NAME}")
+    except Exception as e:
+        st.error(f"Nie znaleziono organizacji: {GITHUB_ORG_NAME}. Błąd: {e}")
+        st.stop()
+else:
+    target_entity = user
+    owner_name = user.login.lower() # Do nazwy obrazu
+    st.sidebar.info(f"👤 Tryb Użytkownika: {user.login}")
+
+
+st.title(f"🏢 Builder Bot V3")
+st.markdown(f"Tworzę projekty dla: **{owner_name.upper()}**")
 st.markdown("---")
 
-# --- FUNKCJE POMOCNICZE ---
+# --- FUNKCJE ---
 
 def generate_project_structure(prompt):
     """Pyta AI o kod i strukturę plików."""
@@ -35,7 +53,7 @@ def generate_project_structure(prompt):
     
     MUSISZ zwrócić odpowiedź TYLKO jako czysty JSON w formacie:
     {
-        "nazwa_projektu": "krótka-nazwa-bez-spacji",
+        "nazwa_projektu": "krotka-nazwa-bez-spacji-malymi-literami",
         "pliki": {
             "app.py": "kod aplikacji...",
             "requirements.txt": "lista bibliotek...",
@@ -43,16 +61,14 @@ def generate_project_structure(prompt):
             "README.md": "opis..."
         }
     }
-    
     ZASADY:
-    1. Dockerfile MUSI być poprawny i uruchamiać aplikację (np. EXPOSE 80).
-    2. Aplikacja MUSI działać na porcie 80 (jeśli to webówka).
-    3. Kod ma być prosty i działający.
-    4. NIE dodawaj Markdowna (```json) na początku ani na końcu. Czysty JSON.
+    1. Dockerfile MUSI być poprawny i wystawiać port 80.
+    2. Kod ma być prosty i działający.
+    3. JSON musi być poprawny.
     """
     
     response = client.chat.completions.create(
-        model="gpt-4-turbo-preview", # Lub gpt-3.5-turbo jeśli wolisz taniej
+        model="gpt-4-turbo-preview",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
@@ -62,22 +78,26 @@ def generate_project_structure(prompt):
     return json.loads(response.choices[0].message.content)
 
 def create_github_repo(project_name, files):
-    """Tworzy repozytorium i wrzuca pliki."""
+    """Tworzy lub aktualizuje repo w Organizacji lub u Użytkownika."""
+    repo = None
     try:
-        # 1. Tworzenie repo
-        repo = user.create_repo(project_name, private=True)
+        # 1. Próba pobrania istniejącego repo (użytkownika lub org)
+        try:
+            repo = target_entity.get_repo(project_name)
+            st.warning(f"⚠️ Repozytorium '{project_name}' już istnieje w {owner_name}. Nadpisuję...")
+        except GithubException:
+            # 2. Tworzenie nowego (jeśli nie istnieje)
+            # target_entity to albo User albo Organization object
+            repo = target_entity.create_repo(project_name, private=True)
+            st.success(f"✅ Utworzono nowe repozytorium: {owner_name}/{project_name}")
         
-        # 2. Tworzenie plików aplikacji
-        for filename, content in files.items():
-            repo.create_file(filename, f"Init {filename}", content)
-            
-        # 3. Tworzenie GitHub Action (Build & Push)
+        # 3. GitHub Action (Z poprawionym IMAGE_NAME pod organizację)
         workflow_content = f"""
 name: Build and Push
 on: [push]
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: {user.login.lower()}/{project_name}
+  IMAGE_NAME: {owner_name}/{project_name}
 jobs:
   build-push:
     runs-on: ubuntu-latest
@@ -97,26 +117,39 @@ jobs:
           push: true
           tags: ${{{{ env.REGISTRY }}}}/${{{{ env.IMAGE_NAME }}}}:latest
         """
-        repo.create_file(".github/workflows/deploy.yml", "Add CI workflow", workflow_content)
+        files[".github/workflows/deploy.yml"] = workflow_content
+
+        # 4. Upload plików
+        for filename, content in files.items():
+            try:
+                existing_file = repo.get_contents(filename)
+                repo.update_file(existing_file.path, f"Update {filename}", content, existing_file.sha)
+            except GithubException:
+                repo.create_file(filename, f"Init {filename}", content)
         
         return repo.html_url
+
     except Exception as e:
-        st.error(f"Błąd przy tworzeniu repozytorium: {e}")
+        st.error(f"Błąd GitHub: {e}")
         return None
 
 def update_infra_stack(project_name):
-    """Aktualizuje docker-compose.yml w repo homelab-infra."""
+    """Aktualizuje homelab-infra."""
     try:
-        repo = g.get_user().get_repo(INFRA_REPO_NAME)
+        # Infra zawsze jest na koncie użytkownika (lub też w orgu, zależy gdzie trzymasz)
+        # Zakładam, że infra jest tam, gdzie user ma dostęp.
+        repo = user.get_repo(INFRA_REPO_NAME) 
         file = repo.get_contents("docker-compose.yml")
         content = file.decoded_content.decode("utf-8")
         
-        # Szablon nowego serwisu (GitOps)
+        # Generujemy URL obrazu z uwzględnieniem organizacji!
+        image_url = f"ghcr.io/{owner_name}/{project_name}:latest"
+        
         new_service = f"""
   
-  # --- Auto-generated: {project_name} ---
+  # --- Auto: {project_name} ({owner_name}) ---
   {project_name}:
-    image: ghcr.io/{user.login.lower()}/{project_name}:latest
+    image: {image_url}
     container_name: {project_name}
     restart: always
     labels:
@@ -130,20 +163,11 @@ def update_infra_stack(project_name):
     networks:
       - siec
 """
-        # Sprawdź czy już nie istnieje
         if f"container_name: {project_name}" in content:
-            return "Serwis już istnieje w pliku infra."
+            return "Serwis już istnieje w infra."
 
-        # Dopisanie do sekcji services (uproszczone: doklejamy przed networks)
-        # Najlepiej dokleić na koniec pliku, ale przed 'networks:' jeśli jest na końcu.
-        # Dla uproszczenia doklejamy po prostu do łańcucha tekstowego przed definicją networks na dole
-        # lub po prostu na koniec sekcji services.
-        
-        # PROSTA METODA: Szukamy 'networks:' na końcu pliku i wstawiamy przed nim
         if "networks:" in content:
             parts = content.split("networks:")
-            # parts[0] to wszystko do momentu networks
-            # parts[1] to definicja sieci
             new_content = parts[0] + new_service + "\nnetworks:" + parts[1]
         else:
             new_content = content + new_service
@@ -153,35 +177,24 @@ def update_infra_stack(project_name):
     except Exception as e:
         return f"Błąd infra: {e}"
 
-# --- INTERFEJS UŻYTKOWNIKA ---
+# --- GUI ---
 
 with st.form("builder_form"):
-    prompt = st.text_area("Co chcesz zbudować?", "Prosta strona w Pythonie wyświetlająca aktualną godzinę i losowy cytat.")
-    submitted = st.form_submit_button("🚀 Buduj Aplikację")
+    prompt = st.text_area("Co budujemy dla Organizacji?", "Strona wizytówka dla firmy...")
+    submitted = st.form_submit_button("🚀 Buduj w Organizacji")
 
 if submitted:
-    with st.status("🏗️ Pracuję nad Twoim projektem...", expanded=True) as status:
-        
-        # 1. Generowanie kodu
-        st.write("🧠 1. Generuję kod i strukturę (OpenAI)...")
+    with st.status("🏗️ Pracuję...", expanded=True) as status:
+        st.write("🧠 Generowanie kodu...")
         project_data = generate_project_structure(prompt)
-        project_name = project_data['nazwa_projektu']
-        st.json(project_data) # Podgląd dla Ciebie
+        p_name = project_data['nazwa_projektu']
         
-        # 2. GitHub Repo
-        st.write(f"📂 2. Tworzę repozytorium: {project_name}...")
-        repo_url = create_github_repo(project_name, project_data['pliki'])
+        st.write(f"📂 Tworzenie repo w: {owner_name}...")
+        repo_url = create_github_repo(p_name, project_data['pliki'])
         
         if repo_url:
-            st.write(f"✅ Repo gotowe: {repo_url}")
-            
-            # 3. GitOps Update
-            st.write("🔗 3. Aktualizuję infrastrukturę (homelab-infra)...")
-            infra_status = update_infra_stack(project_name)
-            st.write(f"ℹ️ Status infra: {infra_status}")
-            
-            status.update(label="✅ Gotowe! Proces wdrożenia rozpoczęty.", state="complete", expanded=True)
-            st.success(f"Aplikacja **{project_name}** została zakolejkowana.")
-            st.info(f"Dostępna będzie pod adresem: https://{project_name}.osabosa.pl (za ok. 3-5 min)")
-        else:
-            status.update(label="❌ Błąd krytyczny.", state="error")
+            st.write("🔗 Aktualizacja infrastruktury...")
+            update_infra_stack(p_name)
+            status.update(label="✅ Gotowe!", state="complete")
+            st.success(f"Repozytorium: {repo_url}")
+            st.info(f"Adres: https://{p_name}.osabosa.pl")
