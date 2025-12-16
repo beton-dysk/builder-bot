@@ -2,3 +2,5 @@ streamlit
 openai
 PyGithub
 python-dotenv
+flask
+flask-cors
