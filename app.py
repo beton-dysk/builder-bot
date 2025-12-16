@@ -64,7 +64,7 @@ def run_app():
     
     # Uruchom proces (stdout i stderr idą do pliku)
     process = subprocess.Popen(
-        [sys.executable, "-u", APP_FILE],
+        [sys.executable, "-u", "app.py"],
         stdout=log_file,
         stderr=subprocess.STDOUT,
         cwd=SANDBOX_DIR
