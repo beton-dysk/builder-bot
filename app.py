@@ -3,8 +3,8 @@ import openai
 import os
 import subprocess
 import sys
-import threading
 import time
+import signal
 
 # --- KONFIGURACJA ---
 st.set_page_config(page_title="Builder Lab", page_icon="🧪", layout="wide")
@@ -16,16 +16,19 @@ if not OPENAI_API_KEY:
     st.error("❌ Brak klucza OPENAI_API_KEY.")
     st.stop()
 
+# Ustalanie adresu podglądu
 if not DOMAIN:
-    st.warning("⚠️ Brak zmiennej DOMAIN. Podgląd może nie działać.")
     PREVIEW_URL = "http://localhost:5000"
 else:
-    # Generujemy poprawny, publiczny adres HTTPS
     PREVIEW_URL = f"https://preview.{DOMAIN}"
 
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
+# Ścieżki
 SANDBOX_DIR = "sandbox"
 APP_FILE = os.path.join(SANDBOX_DIR, "app.py")
+LOG_FILE = os.path.join(SANDBOX_DIR, "server.log")
+
 os.makedirs(SANDBOX_DIR, exist_ok=True)
 
 # --- SESSION STATE ---
@@ -42,49 +45,52 @@ if "messages" not in st.session_state:
     ]
 if "generated_code" not in st.session_state:
     st.session_state.generated_code = ""
-if "server_process" not in st.session_state:
-    st.session_state.server_process = None
-if "logs" not in st.session_state:
-    st.session_state.logs = []
+# Przechowujemy PID procesu zamiast obiektu, żeby przetrwało odświeżenie strony
+if "server_pid" not in st.session_state:
+    st.session_state.server_pid = None
 
 # --- FUNKCJE ---
 
 def run_app():
-    """Uruchamia aplikację Flask."""
+    """Uruchamia aplikację Flask i przekierowuje logi do pliku."""
     stop_app()
     
     # Zapisz kod
     with open(APP_FILE, "w") as f:
         f.write(st.session_state.generated_code)
     
-    st.session_state.logs = []
+    # Otwórz plik logów
+    log_file = open(LOG_FILE, "w")
     
-    # Uruchom proces
+    # Uruchom proces (stdout i stderr idą do pliku)
     process = subprocess.Popen(
         [sys.executable, "-u", APP_FILE],
-        stdout=subprocess.PIPE,
+        stdout=log_file,
         stderr=subprocess.STDOUT,
-        text=True,
         cwd=SANDBOX_DIR
     )
-    st.session_state.server_process = process
+    st.session_state.server_pid = process.pid
     
-    def log_reader(proc):
-        for line in iter(proc.stdout.readline, ''):
-            st.session_state.logs.append(line)
-            if len(st.session_state.logs) > 50:
-                st.session_state.logs.pop(0)
-    
-    t = threading.Thread(target=log_reader, args=(process,), daemon=True)
-    t.start()
-    
-    # Daj mu chwilę na start
-    time.sleep(2)
+    # Daj chwilę na start
+    time.sleep(1)
 
 def stop_app():
-    if st.session_state.server_process:
-        st.session_state.server_process.terminate()
-        st.session_state.server_process = None
+    """Ubija proces na podstawie PID."""
+    if st.session_state.server_pid:
+        try:
+            os.kill(st.session_state.server_pid, signal.SIGTERM)
+            st.session_state.server_pid = None
+        except ProcessLookupError:
+            st.session_state.server_pid = None
+        except Exception as e:
+            st.error(f"Błąd zatrzymywania: {e}")
+
+def get_logs():
+    """Czyta logi z pliku."""
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r") as f:
+            return f.read()
+    return "Brak logów."
 
 def generate_response(prompt):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -102,10 +108,8 @@ def generate_response(prompt):
         code = bot_reply.split("```")[1].split("```")[0]
         
     if code:
-        # BEZPIECZNIK: Wymuszamy host 0.0.0.0 nawet jak AI zapomni
         if "app.run" in code and "0.0.0.0" not in code:
             code = code.replace("app.run(", "app.run(host='0.0.0.0', ")
-            
         st.session_state.generated_code = code
         run_app()
 
@@ -131,11 +135,18 @@ with col_left:
 with col_right:
     st.subheader("👁️ Preview")
     
-    # Pasek statusu
+    # Sprawdzamy czy proces żyje
+    is_running = False
+    if st.session_state.server_pid:
+        try:
+            os.kill(st.session_state.server_pid, 0) # Sygnał 0 sprawdza czy proces istnieje
+            is_running = True
+        except ProcessLookupError:
+            st.session_state.server_pid = None
+
     c1, c2, c3 = st.columns([2, 1, 1])
-    is_running = st.session_state.server_process is not None
-    
     c1.markdown(f"**URL:** `{PREVIEW_URL}`")
+    
     if c2.button("🔄 Restart"):
         if st.session_state.generated_code:
             run_app()
@@ -143,15 +154,12 @@ with col_right:
     
     if is_running:
         c3.success("Running")
-        # --- TU JEST IFRAME ---
-        # Używamy pełnej wysokości i scrollowania
         st.components.v1.iframe(PREVIEW_URL, height=600, scrolling=True)
     else:
         c3.error("Stopped")
-        st.info("Wpisz polecenie w czacie, aby uruchomić serwer.")
-
-    with st.expander("Terminal Logs / Source Code"):
-        st.text("Ostatnie logi:")
-        st.code("".join(st.session_state.logs), language="bash")
-        st.text("Kod źródłowy:")
+    
+    with st.expander("Terminal Logs / Source Code", expanded=True):
+        st.caption("Ostatnie logi (odśwież stronę aby zaktualizować):")
+        st.code(get_logs(), language="bash")
+        st.caption("Kod:")
         st.code(st.session_state.generated_code, language="python")
